@@ -12,6 +12,8 @@ mod rpc;
 
 mod custom_genesis;
 
+mod derived_attributes;
+
 mod debug_trace_post_exec;
 
 mod estimate_gas_7825;

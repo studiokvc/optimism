@@ -24,7 +24,8 @@ use tokio::sync::watch::Sender;
 ///
 /// Tasks within the queue are also considered fallible. If they fail with a temporary error,
 /// they are not popped from the queue, the error is returned, and they are retried on the
-/// next call to [`Engine::drain`].
+/// next call to [`Engine::drain`]. A task that fails with a flush error has already replaced its
+/// block, so it is popped before the error is returned.
 #[derive(Debug)]
 pub struct Engine<EngineClient_: EngineClient> {
     /// The state of the engine.
@@ -120,13 +121,21 @@ impl<EngineClient_: EngineClient> Engine<EngineClient_> {
     }
 
     /// Attempts to drain the queue by executing all [`EngineTask`]s in-order. If any task returns
-    /// an error along the way, it is not popped from the queue (in case it must be retried) and
-    /// the error is returned.
+    /// an error along the way, the error is returned and the task is not popped from the queue (in
+    /// case it must be retried), unless it is a flush error.
     pub async fn drain(&mut self) -> Result<(), EngineTaskErrors> {
         // Drain tasks in order of priority, halting on errors for a retry to be attempted.
         while let Some(task) = self.tasks.peek() {
             // Execute the task
-            task.execute(&mut self.state).await?;
+            let result = task.execute(&mut self.state).await;
+
+            // A flush reports that the task replaced its block with a deposits-only block, so the
+            // task is done; retrying it would replace that block again.
+            if let Err(err) = &result &&
+                err.severity() != EngineTaskErrorSeverity::Flush
+            {
+                return result;
+            }
 
             // Update the state and notify the engine actor.
             self.state_sender.send_replace(self.state);
@@ -135,6 +144,8 @@ impl<EngineClient_: EngineClient> Engine<EngineClient_> {
             self.tasks.pop();
 
             self.task_queue_length.send_replace(self.tasks.len());
+
+            result?;
         }
 
         Ok(())
